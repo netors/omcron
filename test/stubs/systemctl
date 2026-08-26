@@ -10,7 +10,7 @@ for a in "${args[@]}"; do
 done
 
 case " $* " in
-*" daemon-reload "* | *" daemon-reload") exit 0 ;;
+*" daemon-reload "*) exit 0 ;;   # $* is space-wrapped above, so one pattern suffices
 *" is-enabled "*)
   [[ -n $unit && -f "$OMCRON_TEST_STATE/enabled/$unit" ]] && exit 0
   exit 1
