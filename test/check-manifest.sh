@@ -64,6 +64,23 @@ while read -r key; do
   fi
 done < <(jq -r '.barWidget.schema[].key' manifest.json)
 
+# --- the files a user has to run must be executable in the index --------------
+# install.sh shipped 100644 once; the failure only shows up on a fresh install.
+while read -r f; do
+  mode=$(git ls-files -s "$f" | awk '{print $1}')
+  if [[ $mode == "100755" ]]; then
+    ok "$f is executable"
+  else
+    no "$f is executable" "mode $mode — run: git update-index --chmod=+x $f"
+  fi
+done <<'FILES'
+bin/omcron
+install.sh
+test/run.sh
+test/check-manifest.sh
+test/plugin-validate.sh
+FILES
+
 # --- no symlinks anywhere: the validator rejects the whole plugin -------------
 if [[ -n $(find . -path ./.git -prune -o -type l -print -quit) ]]; then
   no "no symlinks in the repo" "$(find . -path ./.git -prune -o -type l -print | head -3)"
