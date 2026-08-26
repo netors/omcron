@@ -278,7 +278,10 @@ cmd_fire() {
 
   # One pending token per job, so an unanswered older request is superseded
   # rather than stacking up behind the new one.
-  mkdir -p -m 700 "$PENDING_DIR"
+  # -m with -p only applies to the deepest directory, so set both levels
+  # explicitly — the parent is the one an attacker would race.
+  mkdir -p "$PENDING_DIR"
+  chmod 700 "$PENDING_DIR" "$(dirname "$PENDING_DIR")" 2>/dev/null || true
   token="$(date +%s)-$RANDOM"
   jq -n --arg name "$name" --arg token "$token" --argjson at "$(date +%s)" \
     '{name:$name,token:$token,at:$at}' >"$PENDING_DIR/$name.json"
@@ -399,7 +402,7 @@ cmd_list() {
   fi
 
   printf '%-16s %-6s %-22s %-18s %s\n' NAME MODE SCHEDULE "NEXT RUN" COMMAND
-  local f name job mode schedule cmd next state
+  local f name job mode schedule cmd next
   for f in "${files[@]}"; do
     job=$(<"$f")
     name=$(jq -r .name <<<"$job")

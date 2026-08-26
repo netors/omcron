@@ -8,7 +8,6 @@ OMCRON_BIN="$REPO_ROOT/bin/omcron"
 
 PASS=0
 FAIL=0
-CURRENT=""
 
 sandbox_new() {
   SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/omcron-test.XXXXXX")

@@ -6,7 +6,7 @@
 set -uo pipefail
 
 REPO=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$REPO"
+cd "$REPO" || exit 1
 
 fail=0
 ok() { printf '  ok   %s\n' "$1"; }
@@ -20,29 +20,33 @@ id=$(jq -r .id manifest.json)
 version=$(jq -r .version manifest.json)
 
 # --- the id must agree everywhere --------------------------------------------
-grep -q "moduleName: \"$id\"" BarWidget.qml &&
-  ok "BarWidget moduleName matches manifest id" ||
-  no "BarWidget moduleName matches manifest id" "expected moduleName: \"$id\""
+check_grep() { # description, pattern, file, hint
+  if grep -q "$2" "$3"; then ok "$1"; else no "$1" "$4"; fi
+}
 
-grep -q "target: \"$id\"" BarWidget.qml &&
-  ok "IpcHandler target matches manifest id" ||
-  no "IpcHandler target matches manifest id" "expected target: \"$id\""
-
-grep -q "BAR_MODULE=\${OMCRON_BAR_MODULE:-$id}" bin/omcron &&
-  ok "CLI bar target matches manifest id" ||
-  no "CLI bar target matches manifest id" "bin/omcron must default BAR_MODULE to $id"
+check_grep "BarWidget moduleName matches manifest id" \
+  "moduleName: \"$id\"" BarWidget.qml "expected moduleName: \"$id\""
+check_grep "IpcHandler target matches manifest id" \
+  "target: \"$id\"" BarWidget.qml "expected target: \"$id\""
+check_grep "CLI bar target matches manifest id" \
+  "BAR_MODULE=\${OMCRON_BAR_MODULE:-$id}" bin/omcron \
+  "bin/omcron must default BAR_MODULE to $id"
 
 # --- versions must agree ------------------------------------------------------
 cli_version=$(OMCRON_SELF=/dev/null ./bin/omcron version | awk '{print $2}')
-[[ $cli_version == "$version" ]] &&
-  ok "CLI version matches manifest ($version)" ||
+if [[ $cli_version == "$version" ]]; then
+  ok "CLI version matches manifest ($version)"
+else
   no "CLI version matches manifest" "manifest $version, CLI $cli_version"
+fi
 
 if [[ -f CHANGELOG.md ]]; then
   top=$(grep -m1 -oE '^## \[?v?[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-  [[ $top == "$version" ]] &&
-    ok "CHANGELOG top entry matches manifest ($version)" ||
+  if [[ $top == "$version" ]]; then
+    ok "CHANGELOG top entry matches manifest ($version)"
+  else
     no "CHANGELOG top entry matches manifest" "manifest $version, changelog ${top:-none}"
+  fi
 fi
 
 # --- every exposed setting must actually be read ------------------------------

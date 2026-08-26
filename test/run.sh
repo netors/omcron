@@ -4,6 +4,7 @@
 set -uo pipefail
 
 TEST_ROOT=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
 source "$TEST_ROOT/lib.sh"
 
 total_pass=0
