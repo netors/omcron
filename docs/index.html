@@ -147,246 +147,265 @@ footer{max-width:68ch;margin-top:60px;padding-top:22px;border-top:1px solid var(
 @media (prefers-reduced-motion:reduce){*{transition-duration:.01ms!important}}
 @media print{aside.toc,.copy{display:none}.shell{grid-template-columns:1fr}details{border:none}details .body{display:block!important}}
 </style>
+
 </head>
 <body>
 <div class="shell">
 <aside class="toc">
   <div class="brand">om<span>cron</span></div>
-  <div class="brand-sub">Scheduled jobs for Omarchy that ask before they act.</div>
-  <div class="grp">Start</div>
-  <a href="#why">Why it exists</a>
-  <a href="#glance">At a glance</a>
+  <div class="brand-sub">Scheduled jobs for Omarchy that run on their own, or ask first.</div>
+  <div class="grp">Setup</div>
   <a href="#install">Install</a>
-  <div class="grp">Concepts</div>
-  <a href="#jobs">Jobs and schedules</a>
-  <a href="#modes">The two modes</a>
-  <a href="#approval">The approval flow</a>
-  <div class="grp">Reference</div>
-  <a href="#cli">CLI</a>
+  <a href="#quickstart">Quick start</a>
+  <div class="grp">Using it</div>
+  <a href="#jobs">Creating jobs</a>
+  <a href="#schedules">Schedules</a>
+  <a href="#modes">Auto and ask</a>
+  <a href="#approving">Approving a job</a>
   <a href="#widget">Bar widget</a>
-  <a href="#layout">Files and data</a>
-  <div class="grp">Notes</div>
-  <a href="#findings">Shell findings</a>
-  <a href="#decisions">Design decisions</a>
-  <a href="#verified">What was tested</a>
-  <a href="#upstream">Upstreaming</a>
-  <a href="#source">Source</a>
+  <div class="grp">Reference</div>
+  <a href="#commands">Commands</a>
+  <a href="#files">Files</a>
+  <a href="#env">Environment</a>
+  <a href="#trouble">Troubleshooting</a>
+  <a href="#uninstall">Uninstall</a>
   <div class="themer"><span>Theme</span><button id="themeBtn">switch</button></div>
 </aside>
 
 <main>
-<h1>Scheduled jobs that ask before they act</h1>
-<p class="lede">Omarchy has reminders, which are one-shot and inert, and Arch has cron, which runs whatever you gave it whether or not you are ready. <strong>omcron</strong> is the middle: a repeating job that either runs on its own, or posts a notification asking permission first — using the same toast the reminders use.</p>
-
-<h2 id="why">Why it exists</h2>
-<p class="sub">The gap between a reminder and a cron job</p>
-<p>A reminder tells you to do something and then forgets about it; you still run the command yourself. A cron job runs the command but never asks, which is fine for a backup and wrong for anything that changes your tools, touches the network, or interrupts what you are doing.</p>
-<p>The motivating case: a package manager holds a release behind a 24-hour age gate. You want the upgrade attempted every weekday morning, but you want to say <em>yes</em> first, because sometimes you are mid-task and an upgrade is the last thing you want. A reminder would nag you into running it by hand. A cron job would run it behind your back. omcron posts a notification you click to approve.</p>
-
-<h2 id="glance">At a glance</h2>
-<p class="sub">What you get</p>
-<div class="tw"><table>
-<tr><th>Capability</th><th>How</th></tr>
-<tr><td>Repeating schedule</td><td>A real <code>systemd</code> user timer per job. Survives logout and reboot.</td></tr>
-<tr><td>Catch-up after downtime</td><td><code>--persistent</code> sets <code>Persistent=true</code> on the timer.</td></tr>
-<tr><td>Run unattended</td><td><span class="pill auto">--auto</span> runs and notifies the outcome, including failures.</td></tr>
-<tr><td>Ask permission</td><td><span class="pill ask">--ask</span> posts a clickable toast offering Run / Skip / Snooze.</td></tr>
-<tr><td>Bar presence</td><td>An indicator beside the reminder and do-not-disturb icons, with a hover tooltip listing every job and when it next runs.</td></tr>
-<tr><td>Per-job output</td><td>Appended to a log, reachable from the toast and from the CLI.</td></tr>
-<tr><td>Dependencies</td><td><code>bash</code>, <code>jq</code>, <code>systemd</code>, and Omarchy's own <code>omarchy-notification-send</code> / <code>omarchy-menu-select</code>. Nothing else.</td></tr>
-</table></div>
+<h1>omcron</h1>
+<p class="lede">Repeating jobs for Omarchy. Each one either runs on schedule and tells you how it went, or posts a notification and waits for you to approve it.</p>
 
 <h2 id="install">Install</h2>
-<p class="sub">Two commands, and why it is two rather than one</p>
+<p class="sub">Two commands</p>
 <div class="cw"><pre><code>omarchy plugin add https://github.com/netors/omcron.git --enable --yes
 ~/.config/omarchy/plugins/netors.omcron/install.sh</code></pre></div>
-<p>The first installs the bar widget; the second puts the <code>omcron</code> command on your <code>PATH</code>. It is deliberately two steps: <code>omarchy plugin add</code> never runs code from a plugin — no install hooks, no <code>sudo</code> — so nothing can put a binary on your <code>PATH</code> on your behalf.</p>
-<div class="note"><b>The directory is named from the plugin id</b><p>A plugin is cloned to <code>~/.config/omarchy/plugins/&lt;manifest id&gt;/</code>, not to the repo name. So the repo <code>netors/omcron</code> installs to <code>netors.omcron/</code>. Every path in this document uses the id.</p></div>
-<p>Place the widget wherever suits you — beside the indicator cluster is a reasonable default:</p>
+<p>The first installs the bar widget. The second puts the <code>omcron</code> command on your <code>PATH</code>. Both are needed.</p>
+<p>Put the widget where you want it on the bar:</p>
 <div class="cw"><pre><code>omarchy bar put netors.omcron --section center --after omarchy.indicators</code></pre></div>
-<h3>CLI only</h3>
-<p>The command works without the widget, and without Omarchy, given a systemd user instance:</p>
+
+<h3>Without the bar widget</h3>
 <div class="cw"><pre><code>git clone https://github.com/netors/omcron.git &amp;&amp; cd omcron &amp;&amp; ./install.sh</code></pre></div>
-<p>Set <code>OMCRON_NOTIFY</code> and <code>OMCRON_PICKER</code> to point at <code>notify-send</code>, <code>fuzzel</code> or <code>rofi</code> if Omarchy's own tools are not present.</p>
+
+<h3>Requirements</h3>
+<ul>
+<li><code>bash</code> 4+, <code>jq</code>, and a systemd user instance</li>
+<li><code>omarchy-notification-send</code> and <code>omarchy-menu-select</code> for notifications and the approval picker</li>
+<li>A Nerd Font for the bar glyphs</li>
+</ul>
+
 <h3>Updating</h3>
 <div class="cw"><pre><code>omarchy plugin update netors.omcron</code></pre></div>
-<p>This is a fast-forward pull of the repo, re-validated afterwards and rolled back automatically if validation fails. Because the CLI is symlinked out of the plugin directory by <code>install.sh</code>, the same command updates the command and the widget together.</p>
+<p>This updates the command and the widget together.</p>
 
-<h2 id="jobs">Jobs and schedules</h2>
-<p class="sub">One JSON file and one timer pair per job</p>
-<p>A job is a name, a schedule, a command, and a mode. The command is stored as an <strong>argv array</strong>, never a string, so an argument containing spaces stays one argument and can never be re-parsed into a command:</p>
-<div class="cw"><pre><code>omcron add mise-claude --at 'Mon..Fri 09:30' --ask \
-  --desc 'Upgrade Claude' --run mise upgrade claude</code></pre></div>
-<p>Use <code>--shell '&lt;line&gt;'</code> instead when you genuinely want pipes, globs or redirection. <code>--run</code> must come last, because it consumes the rest of the line.</p>
-<p>Schedules are <strong>systemd <code>OnCalendar</code> expressions</strong>, not five-field cron. There is no translation layer, and every schedule is validated with <code>systemd-analyze calendar</code> at add time — so a typo is rejected immediately rather than silently never firing.</p>
+<h2 id="quickstart">Quick start</h2>
+<p class="sub">Three commands to see it work</p>
+<div class="cw"><pre><code># create a job that runs every day at midnight
+omcron add hello --at daily --auto --desc 'Smoke test' --run echo hi
+
+# run it now, without waiting
+omcron run hello
+
+# see what it did, then remove it
+omcron log hello
+omcron rm hello</code></pre></div>
+
+<h2 id="jobs">Creating jobs</h2>
+<p class="sub">A name, a schedule, a command, and a mode</p>
+<div class="cw"><pre><code>omcron add &lt;name&gt; --at &lt;schedule&gt; [--auto|--ask] [--persistent] [--desc "text"] --run &lt;command...&gt;</code></pre></div>
+
 <div class="tw"><table>
-<tr><th>Expression</th><th>Means</th></tr>
-<tr><td><code>daily</code></td><td>every day at 00:00</td></tr>
-<tr><td><code>hourly</code></td><td>every hour on the hour</td></tr>
-<tr><td><code>Mon..Fri 09:30</code></td><td>weekdays at 09:30</td></tr>
-<tr><td><code>*:0/15</code></td><td>every 15 minutes</td></tr>
-<tr><td><code>Sun *-*-* 04:00</code></td><td>Sundays at 04:00</td></tr>
-<tr><td><code>2026-08-26 15:33</code></td><td>once, at that moment</td></tr>
+<tr><th>Flag</th><th>Meaning</th></tr>
+<tr><td><code>--at</code></td><td>When it runs. See <a href="#schedules">Schedules</a>. Required.</td></tr>
+<tr><td><code>--auto</code></td><td>Run on schedule without asking.</td></tr>
+<tr><td><code>--ask</code></td><td>Post a notification and wait for approval. This is the default.</td></tr>
+<tr><td><code>--persistent</code></td><td>If the machine was off at the scheduled time, run at the next boot instead of skipping.</td></tr>
+<tr><td><code>--desc</code></td><td>The label shown in notifications and the bar tooltip. Defaults to the job name.</td></tr>
+<tr><td><code>--run</code></td><td>The command, as separate words. Must come last.</td></tr>
+<tr><td><code>--shell</code></td><td>A shell command line instead, when you need pipes, globs or redirection.</td></tr>
 </table></div>
 
-<h2 id="modes">The two modes</h2>
-<p class="sub">The whole point of the tool</p>
+<h3>--run and --shell</h3>
+<p><code>--run</code> takes the command as separate words and consumes everything after it, so it has to be the last flag:</p>
+<div class="cw"><pre><code>omcron add claude --at 'Mon..Fri 09:30' --ask --desc 'Upgrade Claude' \
+  --run mise upgrade claude</code></pre></div>
+<p>Use <code>--shell</code> when you want the shell to interpret the line:</p>
+<div class="cw"><pre><code>omcron add trash --at weekly --auto --persistent \
+  --shell 'find ~/.local/share/Trash -mtime +30 -delete'</code></pre></div>
+
+<h2 id="schedules">Schedules</h2>
+<p class="sub">systemd OnCalendar expressions, not cron syntax</p>
+<div class="tw"><table>
+<tr><th>Write</th><th>Runs</th></tr>
+<tr><td><code>daily</code></td><td>Every day at midnight</td></tr>
+<tr><td><code>hourly</code></td><td>Every hour, on the hour</td></tr>
+<tr><td><code>weekly</code></td><td>Mondays at midnight</td></tr>
+<tr><td><code>Mon..Fri 09:30</code></td><td>Weekdays at 09:30</td></tr>
+<tr><td><code>Sat,Sun 11:00</code></td><td>Weekends at 11:00</td></tr>
+<tr><td><code>*:0/15</code></td><td>Every 15 minutes</td></tr>
+<tr><td><code>*-*-01 08:00</code></td><td>The 1st of each month at 08:00</td></tr>
+<tr><td><code>2026-12-25 09:00</code></td><td>Once, at that moment</td></tr>
+</table></div>
+<div class="note"><b>Checking one</b><p>Schedules are validated when you add the job, so a typo is rejected immediately. To test an expression yourself:</p>
+<div class="cw"><pre><code>systemd-analyze calendar 'Mon..Fri 09:30'</code></pre></div></div>
+<p>Cron's <code>*/15 * * * *</code> is not accepted. Write <code>*:0/15</code>.</p>
+
+<h2 id="modes">Auto and ask</h2>
+<p class="sub">The one thing to decide per job</p>
 <div class="modes">
   <button data-m="auto" aria-pressed="true">--auto</button>
   <button data-m="ask" aria-pressed="false">--ask</button>
 </div>
 <div class="modepanel" id="panel-auto">
-  <p><strong>Runs on schedule, tells you afterwards.</strong> The timer fires, the command runs, its output is appended to the job log, and you get a toast with the outcome.</p>
-  <p>Success is a low-urgency toast that clears itself. Failure is <code>critical</code>, so it stays until you deal with it, and carries the exit status. Both are clickable and open the log.</p>
-  <p>Right for backups, cleanups, syncs — anything whose failure you want to hear about but whose success needs no permission.</p>
+  <p><strong>Runs on schedule, then tells you how it went.</strong></p>
+  <p>A successful run posts a notification that clears itself. A failed run posts one that stays until you dismiss it, with the exit status. Clicking either opens the job's log.</p>
+  <p>Use it for backups, cleanups and syncs.</p>
 </div>
 <div class="modepanel" id="panel-ask" hidden>
-  <p><strong>Posts a request instead of running.</strong> Nothing executes until you click. The toast is <code>critical</code> so it never times out, and because Omarchy stores a toast's click action as data rather than as a libnotify action, an unanswered request <em>stays clickable in notification history</em> — even across a shell restart.</p>
-  <p>Clicking opens a picker with five choices. Ignoring the request entirely means the job simply does not run; the next scheduled fire supersedes it.</p>
-  <p>Right for upgrades, anything that interrupts, anything you would want to decline while mid-task.</p>
+  <p><strong>Posts a notification and runs nothing until you click it.</strong></p>
+  <p>The notification stays on screen until you act on it, and remains clickable in notification history if you miss it. Clicking opens a menu with five choices.</p>
+  <p>Use it for upgrades, or anything you might want to decline while you are busy.</p>
 </div>
+<p>Change a job's mode later with <code>omcron edit &lt;name&gt; --auto</code> or <code>--ask</code>.</p>
 
-<h2 id="approval">The approval flow</h2>
-<p class="sub">And the token that keeps it honest</p>
+<h2 id="approving">Approving a job</h2>
+<p class="sub">What happens when an ask job comes due</p>
 <div class="flow">
-  <div class="step"><div class="n">1</div><div><h4>The timer fires</h4><p><code>omcron fire &lt;name&gt;</code> runs as a <code>oneshot</code> service. An auto job stops here and just runs.</p></div></div>
-  <div class="step tok"><div class="n">2</div><div><h4>A one-shot token is minted</h4><p>An ask job writes <code>$XDG_RUNTIME_DIR/omcron/pending/&lt;name&gt;.json</code> holding a fresh token. One pending token per job, so a new fire replaces an unanswered older one rather than stacking up.</p></div></div>
-  <div class="step"><div class="n">3</div><div><h4>The request is posted</h4><p>A <code>critical</code> toast whose click action is <code>omcron respond &lt;name&gt; &lt;token&gt;</code>, carried as an argv vector so no part of it is ever shell-interpreted.</p></div></div>
-  <div class="step tok"><div class="n">4</div><div><h4>The click is validated</h4><p><code>respond</code> fails closed: it proceeds only if the token it was given <em>is</em> the current pending token. No pending file, or a different one, and it refuses. This is what stops a stale toast from running the job days later.</p></div></div>
-  <div class="step"><div class="n">5</div><div><h4>You choose</h4><p>The picker opens. Only a real decision spends the token.</p></div></div>
+  <div class="step"><div class="n">1</div><div><h4>A notification appears</h4><p>"Run: &lt;description&gt;?" It stays until you act on it. If you miss it, it is still in notification history and still clickable.</p></div></div>
+  <div class="step"><div class="n">2</div><div><h4>Click it</h4><p>A menu opens with five options. You can also click the bar widget, which opens the menu for the oldest waiting job.</p></div></div>
+  <div class="step"><div class="n">3</div><div><h4>Choose</h4><p>Only Run, Skip and Snooze answer the request. Reading the log or pressing Esc leaves it waiting, so nothing is lost by looking first.</p></div></div>
 </div>
 <div class="outcomes">
-  <div class="oc"><h4>Run now</h4><p>Executes the command, logs it, posts the outcome.</p><span class="tok spent">token spent</span></div>
-  <div class="oc"><h4>Skip this one</h4><p>Declines this occurrence. The recurrence is untouched.</p><span class="tok spent">token spent</span></div>
-  <div class="oc"><h4>Snooze 15m / 1h</h4><p>Arms a transient timer to re-post later. The schedule itself does not move.</p><span class="tok spent">token spent, re-minted later</span></div>
-  <div class="oc"><h4>Open the log</h4><p>Reading is not deciding, so the request survives.</p><span class="tok kept">token kept</span></div>
-  <div class="oc"><h4>Esc / dismiss</h4><p>Re-posts the same request so an accidental dismissal costs nothing.</p><span class="tok kept">token kept</span></div>
+  <div class="oc"><h4>Run now</h4><p>Runs the command and reports the result.</p></div>
+  <div class="oc"><h4>Skip this one</h4><p>Declines this run. The schedule is unchanged.</p></div>
+  <div class="oc"><h4>Snooze 15m / 1h</h4><p>Asks again later. The schedule is unchanged.</p></div>
+  <div class="oc"><h4>Open the log</h4><p>Opens past output. Still waiting afterwards.</p></div>
+  <div class="oc"><h4>Esc</h4><p>Closes the menu. The request comes back.</p></div>
 </div>
-
-<h2 id="cli">CLI</h2>
-<p class="sub">Everything the tool does</p>
-<div class="tw"><table>
-<tr><th>Command</th><th>Does</th></tr>
-<tr><td><code>add &lt;name&gt;</code></td><td>Create a job. <code>--at</code>, <code>--auto</code>/<code>--ask</code>, <code>--persistent</code>, <code>--desc</code>, then <code>--run</code> or <code>--shell</code>.</td></tr>
-<tr><td><code>list [--json]</code></td><td>Every job, schedule, next run, command. The JSON feeds the bar.</td></tr>
-<tr><td><code>show &lt;name&gt;</code></td><td>One job in full, including its log path.</td></tr>
-<tr><td><code>run &lt;name&gt;</code></td><td>Run immediately, bypassing approval entirely.</td></tr>
-<tr><td><code>test &lt;name&gt;</code></td><td>Simulate a scheduled fire — an ask job really does ask.</td></tr>
-<tr><td><code>log &lt;name&gt; [n]</code></td><td>Tail the run log.</td></tr>
-<tr><td><code>pending</code></td><td>Requests currently waiting on you.</td></tr>
-<tr><td><code>edit &lt;name&gt;</code></td><td>Change schedule, mode, description, persistence. Rewrites and reloads the units.</td></tr>
-<tr><td><code>enable</code> / <code>disable</code></td><td>Stop or resume the timer, keeping the job.</td></tr>
-<tr><td><code>rm &lt;name&gt;</code></td><td>Remove job and units. The log is kept.</td></tr>
-<tr><td><code>status</code></td><td>Summarise the schedule as a toast. Bar click target.</td></tr>
-<tr><td><code>answer</code></td><td>Open the picker for the oldest pending request. Bar click target.</td></tr>
-<tr><td><code>fire</code> / <code>respond</code></td><td>Internal: the timer target and the toast click target.</td></tr>
-</table></div>
-
+<div class="note"><b>Ignoring a request</b><p>If you never answer, the job does not run. The next scheduled time replaces the old request with a new one. There is no automatic fallback to running it.</p></div>
+<p>To see what is waiting, or answer it from the terminal:</p>
+<div class="cw"><pre><code>omcron pending
+omcron answer</code></pre></div>
 <h2 id="widget">Bar widget</h2>
-<p class="sub">All logic in the CLI, none in the QML</p>
-<p>The widget is deliberately thin: the CLI emits a JSON envelope and the QML only renders it. That split keeps every decision somewhere testable without a compositor.</p>
-<div class="cw"><pre><code>$ omcron list --json
-{"count":1,"waiting":0,"active":true,
- "tooltip":"1 job scheduled\nUpgrade Claude  Thu 27 Aug 09:30  (asks)",
- "jobs":[ ... ]}</code></pre></div>
-<p>A timer glyph when jobs are scheduled; an alert glyph <em>in the urgent colour</em> when one is waiting on you. Hovering lists every job and its next run. Clicking answers the oldest outstanding request, or posts a summary when there is none.</p>
+<p class="sub">What it shows, and what clicking does</p>
+<p>The widget shows a timer glyph when jobs are scheduled, and an alert glyph in the urgent colour when one is waiting for you. Hover it to list every job and when it next runs.</p>
+<div class="tw"><table>
+<tr><th>Click</th><th>Does</th></tr>
+<tr><td>With a job waiting</td><td>Opens the approval menu for the oldest waiting job</td></tr>
+<tr><td>With nothing waiting</td><td>Shows a summary of the schedule</td></tr>
+</table></div>
+<h3>Settings</h3>
+<p>Editable from the bar's own settings panel, or directly in <code>~/.config/omarchy/shell.json</code>.</p>
 <div class="tw"><table>
 <tr><th>Setting</th><th>Default</th><th>Does</th></tr>
 <tr><td><code>showWhenEmpty</code></td><td><code>true</code></td><td>Stay on the bar, dimmed, when there are no jobs</td></tr>
-<tr><td><code>attentionOnly</code></td><td><code>false</code></td><td>Hide unless something is waiting. Overrides the above</td></tr>
-<tr><td><code>refreshIntervalSec</code></td><td><code>60</code></td><td>How often to re-read state. CLI changes refresh it immediately regardless</td></tr>
+<tr><td><code>attentionOnly</code></td><td><code>false</code></td><td>Hide unless a job is waiting. Overrides the setting above</td></tr>
+<tr><td><code>refreshIntervalSec</code></td><td><code>60</code></td><td>How often it re-reads state. Changes you make with <code>omcron</code> show up immediately regardless</td></tr>
 </table></div>
+<h3>Moving it</h3>
+<div class="cw"><pre><code>omarchy bar move netors.omcron --section right
+omarchy bar move netors.omcron --section center --after omarchy.clock</code></pre></div>
 
-<h3>Why a standalone widget and not an indicator</h3>
-<p>This is the part worth reading if you are writing an Omarchy plugin of your own.</p>
-<p>The obvious home for this is Omarchy's <em>Indicators</em> cluster, beside the reminder bell and the do-not-disturb icon. You cannot get there. Indicator discovery is one hardcoded line in <code>Indicators.qml</code>:</p>
-<div class="cw"><pre><code>source: Qt.resolvedUrl("../indicators/" + indicatorSlot.indicatorId + ".qml")</code></pre></div>
-<p>That is the entire mechanism. There is no search path, no user override directory, no <code>indicator</code> plugin kind, and no registry API — <code>BarWidgetRegistry</code> keys on whole widgets by manifest id, and nothing analogous exists one level down. The manifest's <code>items</code> list is a hardcoded array of the six built-ins.</p>
-<p>Upstream's sanctioned answer is <code>omarchy plugin clone omarchy.indicators</code>, which copies the whole widget into your plugins directory and rewrites its loader paths. That works, and this tool shipped that way at first. But a clone is a <strong>fork</strong>: every user who installed it would stop receiving upstream changes to a core bar widget, forever, in exchange for one icon.</p>
-<p>A standalone bar widget costs one thing — it sits <em>beside</em> the cluster rather than inside it, and does not share the cluster's hover-reveal — and buys first-class plugin lifecycle, <code>omarchy plugin update</code>, a generated settings UI, and placement anywhere on the bar. That trade is not close.</p>
-
-<h2 id="layout">Files and data</h2>
-<p class="sub">Everything is a plain file</p>
+<h2 id="commands">Commands</h2>
+<p class="sub">The full surface</p>
 <div class="tw"><table>
-<tr><th>Path</th><th>Holds</th></tr>
-<tr><td><code>~/.local/bin/omcron</code></td><td>Symlink to the CLI inside the plugin directory, so updates reach both at once.</td></tr>
-<tr><td><code>~/.config/omcron/jobs/&lt;name&gt;.json</code></td><td>Job definition: schedule, argv, mode, captured PATH.</td></tr>
-<tr><td><code>~/.config/systemd/user/omcron-&lt;name&gt;.{service,timer}</code></td><td>Generated units. Never hand-edited; rewritten by <code>edit</code>.</td></tr>
-<tr><td><code>~/.local/state/omcron/&lt;name&gt;.log</code></td><td>Appended run output with timestamps and exit status.</td></tr>
-<tr><td><code>$XDG_RUNTIME_DIR/omcron/pending/&lt;name&gt;.json</code></td><td>The live approval token. Deliberately volatile — a reboot cancels stale requests.</td></tr>
-<tr><td><code>~/.config/omarchy/plugins/netors.omcron/</code></td><td>The plugin: manifest, bar widget, and the CLI that <code>install.sh</code> links onto your PATH.</td></tr>
+<tr><th>Command</th><th>Does</th></tr>
+<tr><td><code>omcron add &lt;name&gt;</code></td><td>Create a job</td></tr>
+<tr><td><code>omcron list</code></td><td>Every job, its schedule, next run and command</td></tr>
+<tr><td><code>omcron list --json</code></td><td>The same as JSON</td></tr>
+<tr><td><code>omcron show &lt;name&gt;</code></td><td>One job in full, including its log path</td></tr>
+<tr><td><code>omcron run &lt;name&gt;</code></td><td>Run it now, without asking</td></tr>
+<tr><td><code>omcron test &lt;name&gt;</code></td><td>Pretend it came due. An ask job really does ask</td></tr>
+<tr><td><code>omcron log &lt;name&gt; [n]</code></td><td>Output of past runs, most recent last</td></tr>
+<tr><td><code>omcron pending</code></td><td>Requests waiting on you</td></tr>
+<tr><td><code>omcron answer</code></td><td>Open the menu for the oldest waiting request</td></tr>
+<tr><td><code>omcron status</code></td><td>Post a summary of the schedule as a notification</td></tr>
+<tr><td><code>omcron edit &lt;name&gt;</code></td><td>Change schedule, mode, description or persistence</td></tr>
+<tr><td><code>omcron enable &lt;name&gt;</code></td><td>Resume a paused job</td></tr>
+<tr><td><code>omcron disable &lt;name&gt;</code></td><td>Pause it without deleting it</td></tr>
+<tr><td><code>omcron rm &lt;name&gt;</code></td><td>Delete the job. Its log is kept</td></tr>
+<tr><td><code>omcron doctor [--fix]</code></td><td>Check the install and repair what it can</td></tr>
+<tr><td><code>omcron version</code></td><td>Print the version</td></tr>
 </table></div>
-<h2 id="findings">Shell findings worth knowing</h2>
-<p class="sub">Two behaviours of the Omarchy shell that are not guessable, and that any adopter will hit</p>
-<div class="note warn"><b>Toast lifetime is decided by urgency, not by <code>-t</code></b>
-<p>In <code>Service.qml</code>, <code>durationFor()</code> gives <code>low</code> 5&nbsp;s and <code>normal</code> 8&nbsp;s, both capped at 30&nbsp;s <em>even if you pass a longer <code>-t</code></em>. Only <code>-u critical</code> returns duration <code>0</code>, meaning it stays until acted on.</p>
-<p><strong>Any notification that asks for a decision must be <code>critical</code>.</strong> The first version of this tool used <code>normal</code> and approval requests silently evaporated after eight seconds.</p></div>
-<div class="note warn"><b>Click actions are persisted as data</b>
-<p><code>omarchy-notification-send --exec</code> stores the argv vector in the <code>omarchy-exec-argv</code> hint rather than registering a libnotify action, so a toast stays clickable from notification history across a shell restart (<code>NotificationLogic.js</code>).</p>
-<p>Excellent for recoverability — a missed approval is not lost. But it means <strong>a click-to-act design must validate at click time</strong>: without that, a request from days ago is still armed. Hence the one-shot token.</p></div>
-<p>Related: <code>--exec</code> takes the command as separate words and explicitly refuses a single word containing spaces, so an untrusted value can only ever be one argument. omcron mirrors that posture for <code>--run</code>.</p>
 
-<h2 id="decisions">Design decisions</h2>
-<p class="sub">The ones an adopter would otherwise have to rediscover</p>
+<h3>Editing a job</h3>
+<div class="cw"><pre><code>omcron edit backup --at 'Sun 03:00'      # change when it runs
+omcron edit backup --auto                # stop asking first
+omcron edit backup --persistent          # catch up missed runs
+omcron edit backup --desc 'Nightly backup'</code></pre></div>
+<p>To change the command itself, remove the job and add it again.</p>
 
-<h3>Named <code>omcron</code>, not <code>omarchy-cron</code></h3>
-<p><code>/usr/share/omarchy/bin</code> comes <em>first</em> on <code>PATH</code>, ahead of <code>~/.local/bin</code>. If upstream ever shipped a command called <code>omarchy-cron</code>, it would silently shadow this one and every job would stop working with no visible cause. A distinct name is immune.</p>
-<p>The trade-off: it cannot be reached as <code>omarchy cron</code>. The dispatcher resolves subcommands by scanning its own package <code>bin</code> directory (<code>OMARCHY_BIN_DIR</code>, derived from the script's own location), which a user-installed command can never join without editing package-owned files. An upstream version would not have this constraint — see below.</p>
+<h2 id="files">Files</h2>
+<p class="sub">Where everything lives</p>
+<div class="tw"><table>
+<tr><th>Path</th><th>Contains</th></tr>
+<tr><td><code>~/.config/omcron/jobs/&lt;name&gt;.json</code></td><td>The job definition</td></tr>
+<tr><td><code>~/.config/systemd/user/omcron-&lt;name&gt;.{service,timer}</code></td><td>Generated systemd units. Do not edit by hand — <code>omcron edit</code> rewrites them</td></tr>
+<tr><td><code>~/.local/state/omcron/&lt;name&gt;.log</code></td><td>Output of past runs, with timestamps and exit status</td></tr>
+<tr><td><code>~/.config/omarchy/plugins/netors.omcron/</code></td><td>The plugin: bar widget and the command itself</td></tr>
+<tr><td><code>~/.local/bin/omcron</code></td><td>Symlink to the command inside the plugin directory</td></tr>
+</table></div>
+<p>Jobs run under systemd, so <code>systemctl --user list-timers 'omcron-*'</code> and <code>journalctl --user -u omcron-&lt;name&gt;.service</code> both work as usual.</p>
 
-<h3>PATH is captured at add time</h3>
-<p>A systemd user service gets a minimal environment. Without help, a job calling <code>mise</code>, or anything in <code>~/.local/bin</code>, fails with a bare <em>command not found</em> at 3&nbsp;am. So <code>add</code> records the current <code>PATH</code> into the job and bakes it into the unit as <code>Environment=PATH=…</code>.</p>
-<div class="note"><b>Consequence</b><p>The job inherits the PATH of the shell that created it, frozen. Re-add or <code>edit</code> a job after a significant toolchain change. An upstream version might prefer resolving the binary to an absolute path at add time instead.</p></div>
+<h2 id="env">Environment</h2>
+<p class="sub">For non-Omarchy systems, or different tools</p>
+<div class="tw"><table>
+<tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
+<tr><td><code>OMCRON_NOTIFY</code></td><td><code>omarchy-notification-send</code></td><td>Command used to post notifications</td></tr>
+<tr><td><code>OMCRON_PICKER</code></td><td><code>omarchy-menu-select</code></td><td>Command used for the approval menu</td></tr>
+<tr><td><code>OMCRON_TERMINAL</code></td><td><code>omarchy-launch-terminal</code></td><td>Used to open a log from a notification</td></tr>
+<tr><td><code>OMCRON_SHELL</code></td><td><code>omarchy-shell</code></td><td>Used to refresh the bar widget</td></tr>
+</table></div>
+<p>Set these in your shell profile to run omcron with <code>notify-send</code>, <code>fuzzel</code> or <code>rofi</code> instead.</p>
 
-<h3>OnCalendar, not cron syntax</h3>
-<p>Passing schedules straight through to systemd means no translation layer to get wrong, free validation via <code>systemd-analyze calendar</code>, and access to expressions cron cannot express. The cost is that <code>*/15 * * * *</code> is not accepted; write <code>*:0/15</code>.</p>
+<h2 id="trouble">Troubleshooting</h2>
+<p class="sub">Start here</p>
+<div class="cw"><pre><code>omcron doctor</code></pre></div>
+<p>Checks that everything it needs is present, that each job's units exist and point at the right place, and that nothing has been left behind. <code>omcron doctor --fix</code> repairs what it can.</p>
 
-<h3>Failing closed everywhere</h3>
-<p>Unknown option, unparseable schedule, missing job, ambiguous <code>--run</code>, stale token: all refuse rather than guess. The one place this is user-visible is that <strong>ignoring a request means the job does not run</strong>. There is no escalation and no auto-run fallback, which is the correct default for a consent gate but does mean an ask job can go a long time without running if you are away.</p>
-
-<h2 id="verified">What is tested</h2>
-<p class="sub">And, more usefully, what is not</p>
-<p>110 automated assertions run on every push: argument handling, unit-file generation, the <code>list --json</code> envelope the widget consumes, run and failure logging, the full job lifecycle, <code>doctor</code>, and the approval gate.</p>
-<p>The approval gate is the interesting one. Every bug this tool has had lived there, and none was reachable without a human clicking a notification and choosing from a picker. The fix was to make both external interactions injectable — <code>OMCRON_NOTIFY</code> and <code>OMCRON_PICKER</code> — so a stub can stand in for them. Those same seams let you run omcron with <code>notify-send</code> and <code>fuzzel</code> instead, which is a nicer justification than "for the tests".</p>
-<div class="note bug"><b>Three bugs found by hand-testing, all in the consent gate</b>
-<p><strong>1. Requests expired after 8 seconds.</strong> They were sent at <code>normal</code> urgency. Only <code>critical</code> returns duration <code>0</code> in the shell's <code>durationFor()</code> — a decision request must never time out.</p>
-<p><strong>2. The token guard failed open.</strong> Written as <code>if [[ -n $token &amp;&amp; -f $pending ]]</code>, so once any click removed the pending file, every stale toast fell straight through to the picker. Since click actions are persisted as data and outlive their request, an approval from days ago stayed armed. Now a missing pending file is a refusal.</p>
-<p><strong>3. Esc silently discarded the occurrence.</strong> Dismissing the picker consumed the token, making an accidental keypress <em>less</em> recoverable than ignoring the toast entirely. It now re-posts the same token.</p>
-<p>All three are locked in as regression tests.</p></div>
-<div class="note warn"><b>The honest gap</b>
-<p>The stubbed picker asserts <em>the labels omcron sends</em>, not that <code>omarchy-menu-select</code> returns them unchanged. If that tool's return format ever changes, all five branches break and <strong>CI stays green</strong>. Likewise none of Omarchy's interfaces are versioned, and QML is never linted — <code>qmllint</code> cannot resolve <code>qs.Ui</code> outside the shell tree.</p>
-<p><code>test/MANUAL.md</code> in the repo is the checklist for everything a runner cannot prove: a toast actually persisting, a timer actually firing, the widget actually rendering. It is meant to be walked before tagging a release and after any Omarchy upgrade.</p></div>
-
-<h2 id="upstream">If Omarchy adopted this</h2>
-<p class="sub">What would change in a first-party version</p>
+<h3>A job did not run</h3>
 <ul>
-<li><strong>It becomes <code>omarchy-cron</code></strong>, living in the package <code>bin</code> directory, and the naming constraint above disappears — <code>omarchy cron add …</code> would route automatically via the <code>omarchy:summary</code> / <code>omarchy:group</code> metadata comments the dispatcher scans.</li>
-<li><strong>The bar presence could become a real indicator</strong> inside the stock cluster, which today is impossible for third parties — see <a href="#widget">why a standalone widget</a>. Better still would be an extension point so <em>any</em> plugin can contribute an indicator without forking the widget; that would be worth more to the ecosystem than adopting this tool.</li>
-<li><strong>An interactive add flow</strong>, the way <code>omarchy reminder -i</code> summons <code>omarchy.reminders</code> — a small Quickshell panel for name, schedule and mode beats remembering OnCalendar syntax.</li>
-<li><strong>Approval buttons in the toast itself</strong>, if the notification surface grows multi-action support, would remove the picker hop. The token model already supports it: each action just carries the same argv with a different verb.</li>
-<li><strong>A migration</strong> for anyone who installed the user-space version, moving <code>~/.config/omcron/jobs/</code> and rewriting unit files under the new name.</li>
+<li>Is it enabled? <code>omcron list</code> shows <code>disabled</code> in the next-run column.</li>
+<li>Was the machine asleep at the time? Without <code>--persistent</code> the run is skipped. Add it with <code>omcron edit &lt;name&gt; --persistent</code>.</li>
+<li>Is it an ask job you did not answer? Check <code>omcron pending</code>.</li>
+<li>Look at the log: <code>omcron log &lt;name&gt;</code>, and the unit's own output with <code>journalctl --user -u omcron-&lt;name&gt;.service</code>.</li>
 </ul>
-<div class="note"><b>Scope this deliberately excludes</b><p>No per-job environment beyond PATH, no dependency ordering between jobs, no run history beyond an appended log, no calendar UI, and no escalation policy for unanswered requests. Each is a reasonable addition; none is needed for the tool to be useful.</p></div>
 
-<h2 id="source">Source</h2>
-<p class="sub">Two files, MIT licensed</p>
-<p>An earlier draft of this page inlined the entire implementation. That was a mistake for a published tool: the listing goes stale on every commit, and since the repo <em>is</em> the plugin, it would also double the diff that <code>omarchy plugin update</code> asks every user to review.</p>
-<div class="tw"><table>
-<tr><th>File</th><th>What it is</th></tr>
-<tr><td><a href="https://github.com/netors/omcron/blob/main/bin/omcron"><code>bin/omcron</code></a></td><td>The whole CLI. Bash, no dependencies beyond <code>jq</code> and systemd.</td></tr>
-<tr><td><a href="https://github.com/netors/omcron/blob/main/BarWidget.qml"><code>BarWidget.qml</code></a></td><td>The bar widget. Renders <code>omcron list --json</code> and nothing else.</td></tr>
-<tr><td><a href="https://github.com/netors/omcron/blob/main/test/MANUAL.md"><code>test/MANUAL.md</code></a></td><td>What the automated suite cannot cover.</td></tr>
-</table></div>
-<p><a href="https://github.com/netors/omcron">github.com/netors/omcron</a></p>
+<h3>"command not found" inside a job</h3>
+<p>Jobs run with the <code>PATH</code> that was in effect when you created them, so a tool installed somewhere new afterwards will not be found. Remove the job and add it again from a shell where the command works:</p>
+<div class="cw"><pre><code>omcron show &lt;name&gt;          # note the schedule and command
+omcron rm &lt;name&gt;
+omcron add &lt;name&gt; --at ... --run ...</code></pre></div>
+<p><code>omcron edit</code> does not re-capture <code>PATH</code>.</p>
+
+<h3>The bar widget is missing or dimmed</h3>
+<ul>
+<li>Dimmed with a tooltip about <code>install.sh</code> means the plugin is installed but the command is not on your <code>PATH</code>. Run the second install step.</li>
+<li>Absent entirely: check it is placed with <code>omarchy bar put netors.omcron --section center</code>.</li>
+<li>Check <code>attentionOnly</code> is not hiding it, and that <code>omcron list --json</code> works from a terminal.</li>
+</ul>
+
+<h3>Notifications do not appear</h3>
+<p>Confirm the notifier exists: <code>omcron doctor</code> lists it under desktop integration. Approval requests are sent at critical urgency, so do-not-disturb does not suppress them.</p>
+
+<h2 id="uninstall">Uninstall</h2>
+<div class="cw"><pre><code># remove jobs first — this also removes their systemd units
+omcron list
+omcron rm &lt;name&gt;
+
+# then the command and the widget
+~/.config/omarchy/plugins/netors.omcron/install.sh --uninstall
+omarchy plugin remove netors.omcron</code></pre></div>
+<p>Logs under <code>~/.local/state/omcron/</code> are left behind; delete them yourself if you want them gone.</p>
 
 <footer>
-  <p>Written against Omarchy 4.x with the Quickshell shell, on Arch. The two shell findings in <a href="#findings">Shell findings</a> are the load-bearing ones — everything else is ordinary systemd.</p>
+  <p><a href="https://github.com/netors/omcron">github.com/netors/omcron</a> · MIT</p>
 </footer>
 </main>
 </div>
 
 <script>
 "use strict";
-// Theme: three states, matching how the page is rendered elsewhere.
 var themeBtn = document.getElementById("themeBtn");
 try {
   var saved = localStorage.getItem("omcron-docs-theme");
@@ -400,7 +419,6 @@ themeBtn.addEventListener("click", function () {
   try { localStorage.setItem("omcron-docs-theme", next); } catch (e) {}
 });
 
-// Mode switch.
 var modeBtns = document.querySelectorAll(".modes button");
 modeBtns.forEach(function (b) {
   b.addEventListener("click", function () {
@@ -412,7 +430,6 @@ modeBtns.forEach(function (b) {
   });
 });
 
-// Copy buttons on every code block.
 document.querySelectorAll(".cw").forEach(function (w) {
   var pre = w.querySelector("pre");
   if (!pre) return;
@@ -424,14 +441,13 @@ document.querySelectorAll(".cw").forEach(function (w) {
       b.textContent = "copied"; b.classList.add("done");
       setTimeout(function () { b.textContent = "copy"; b.classList.remove("done"); }, 1400);
     }, function () {
-      b.textContent = "select it"; 
+      b.textContent = "select it";
       setTimeout(function () { b.textContent = "copy"; }, 1400);
     });
   });
   w.appendChild(b);
 });
 
-// Scroll-spy: highlight the section currently in view.
 var links = [].slice.call(document.querySelectorAll(".toc a"));
 var targets = links.map(function (a) { return document.getElementById(a.getAttribute("href").slice(1)); })
                    .filter(Boolean);
