@@ -1,0 +1,4 @@
+test/.work/
+*.orig
+*.rej
+*.bak

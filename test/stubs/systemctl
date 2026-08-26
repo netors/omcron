@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Records argv; fakes just enough state for omcron's enable/is-enabled/list-timers.
+printf '%s\n' "$*" >>"$OMCRON_TEST_LOG/systemctl.log"
+args=("$@")
+mkdir -p "$OMCRON_TEST_STATE/enabled"
+
+unit=""
+for a in "${args[@]}"; do
+  case $a in *.timer | *.service) unit=$a ;; esac
+done
+
+case " $* " in
+*" daemon-reload "* | *" daemon-reload") exit 0 ;;
+*" is-enabled "*)
+  [[ -n $unit && -f "$OMCRON_TEST_STATE/enabled/$unit" ]] && exit 0
+  exit 1
+  ;;
+*" enable "*)
+  [[ -n $unit ]] && : >"$OMCRON_TEST_STATE/enabled/$unit"
+  exit 0
+  ;;
+*" disable "*)
+  [[ -n $unit ]] && rm -f "$OMCRON_TEST_STATE/enabled/$unit"
+  exit 0
+  ;;
+*" list-timers "*)
+  # Fixed epoch so every assertion on "next run" is deterministic.
+  if [[ -n $unit && -f "$OMCRON_TEST_STATE/enabled/$unit" ]]; then
+    printf '[{"unit":"%s","next":1800000000000000}]\n' "$unit"
+  else
+    printf '[]\n'
+  fi
+  exit 0
+  ;;
+esac
+exit 0

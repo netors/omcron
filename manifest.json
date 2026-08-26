@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "netors.omcron",
+  "name": "omcron",
+  "version": "1.0.0",
+  "author": "Ernesto Ruy Sanchez",
+  "license": "MIT",
+  "description": "Scheduled jobs that run unattended or ask permission first.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Scheduled jobs",
+    "description": "omcron jobs, their next run times, and any approval waiting on you.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "showWhenEmpty": true,
+      "attentionOnly": false,
+      "refreshIntervalSec": 60
+    },
+    "schema": [
+      {
+        "key": "showWhenEmpty",
+        "type": "boolean",
+        "label": "Show when idle",
+        "description": "Keep the widget on the bar, dimmed, when there are no scheduled jobs.",
+        "defaultValue": true
+      },
+      {
+        "key": "attentionOnly",
+        "type": "boolean",
+        "label": "Only when waiting",
+        "description": "Hide the widget unless a job is waiting for your approval. Overrides 'Show when idle'.",
+        "defaultValue": false
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "description": "How often to re-read job state. Changes made by the omcron command refresh the bar immediately regardless.",
+        "defaultValue": 60,
+        "min": 15,
+        "max": 3600,
+        "step": 15
+      }
+    ]
+  }
+}

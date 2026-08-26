@@ -1,0 +1,868 @@
+#!/bin/bash
+
+# omcron — scheduled jobs for Omarchy that either run on their own or ask first.
+#
+# Modelled on `omarchy reminder`, but repeating and with a payload. Every job is
+# a real systemd user timer, so it survives logout and reboot; --persistent
+# additionally catches up a run the machine slept through.
+#
+# Two modes:
+#   --auto  run on schedule, notify the outcome
+#   --ask   post a clickable notification instead; the click opens a
+#           Run / Skip / Snooze menu. Unclicked means not run — the toast stays
+#           actionable in notification history until the next fire supersedes it.
+#
+# Named omcron rather than omarchy-cron on purpose: /usr/share/omarchy/bin comes
+# first on PATH, so an upstream command of that name would silently shadow this.
+
+set -euo pipefail
+
+OMCRON_VERSION="1.0.0"
+
+# Both external interactions are injectable. This is what makes the approval path
+# testable without a human clicking a notification — every bug this tool has had
+# lived in that path — and it lets non-Omarchy users point at fuzzel, rofi or
+# plain notify-send instead.
+NOTIFY_CMD=${OMCRON_NOTIFY:-omarchy-notification-send}
+PICKER_CMD=${OMCRON_PICKER:-omarchy-menu-select}
+SHELL_CMD=${OMCRON_SHELL:-omarchy-shell}
+BAR_MODULE=${OMCRON_BAR_MODULE:-netors.omcron}
+TERM_CMD=${OMCRON_TERMINAL:-omarchy-launch-terminal}
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omcron"
+JOB_DIR="$CONFIG_DIR/jobs"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omcron"
+# Falling back to a bare /tmp would put the approval tokens at a predictable path
+# under a world-writable parent, where another local user could plant one — which
+# on a consent gate is a forged approval. Per-uid fallback, and mode 700 below.
+PENDING_DIR="${XDG_RUNTIME_DIR:-/tmp/omcron-$(id -u)}/omcron/pending"
+# Written into generated unit ExecStart= lines and into notification --exec argv,
+# so it must be absolute and must stay valid. Absolutised WITHOUT resolving
+# symlinks on purpose: when installed as a link in ~/.local/bin pointing into the
+# plugin directory, the link is the stable name — the plugin directory is not.
+SELF=${OMCRON_SELF:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")}
+
+G_CLOCK="󰥔"
+G_OK="󰄬"
+G_FAIL="󰅚"
+G_ASK="󰀦"
+
+die() {
+  echo "omcron: $*" >&2
+  exit 1
+}
+
+_notify_warned=0
+notify() {
+  if ! command -v "$NOTIFY_CMD" >/dev/null 2>&1; then
+    # Silently succeeding here is how a job "runs fine" on a box with no
+    # notifier and nobody ever learns it failed. Say it once, then stay quiet.
+    if ((_notify_warned == 0)); then
+      _notify_warned=1
+      echo "omcron: '$NOTIFY_CMD' not found — notifications are disabled." >&2
+      echo "omcron: set OMCRON_NOTIFY to a notify-send compatible command." >&2
+    fi
+    return 0
+  fi
+  "$NOTIFY_CMD" "$@" >/dev/null 2>&1 || true
+}
+
+# The bar indicator re-reads `omcron list --json` on this broadcast. The cloned
+# widget keeps the stock IPC target, so this name is right either way.
+refresh_bar() { "$SHELL_CMD" -q "$BAR_MODULE" refresh >/dev/null 2>&1 || true; }
+
+valid_name() { [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; }
+
+job_file() { echo "$JOB_DIR/$1.json"; }
+unit_base() { echo "omcron-$1"; }
+
+require_job() {
+  [[ -n ${1:-} ]] || die "which job? (see: omcron list)"
+  # The name is interpolated into $UNIT_DIR paths that cmd_rm passes to rm.
+  valid_name "$1" || die "invalid job name: '$1'"
+  [[ -f $(job_file "$1") ]] || die "no job named '$1' (see: omcron list)"
+}
+
+# ---------------------------------------------------------------- add
+
+cmd_add() {
+  local name="" schedule="" desc="" mode="ask" persistent=0 shell_line=""
+  local -a argv=()
+
+  name=${1:-}
+  [[ -n $name ]] || die "usage: omcron add <name> --at <schedule> --run <command...>"
+  shift
+  valid_name "$name" || die "name must be letters, digits, dash or underscore: '$name'"
+
+  while (($# > 0)); do
+    case $1 in
+    --at | --every | --on)
+      shift
+      (($# > 0)) || die "--at needs a schedule"
+      schedule=$1
+      ;;
+    --desc | --description)
+      shift
+      (($# > 0)) || die "--desc needs text"
+      desc=$1
+      ;;
+    --ask) mode="ask" ;;
+    --auto) mode="auto" ;;
+    --persistent) persistent=1 ;;
+    --shell)
+      shift
+      (($# > 0)) || die "--shell needs a command line"
+      shell_line=$1
+      ;;
+    --run)
+      # Consumes the rest of the line as argv, exactly like
+      # omarchy-notification-send --exec, so a value with spaces stays one
+      # argument and can never be re-parsed into a command. Must come last.
+      shift
+      argv=("$@")
+      break
+      ;;
+    *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  [[ -n $schedule ]] || die "--at <schedule> is required (try: daily, 'Mon..Fri 09:00', '*:0/15')"
+  if [[ -n $shell_line ]] && ((${#argv[@]} > 0)); then
+    die "use either --run <command...> or --shell '<line>', not both"
+  fi
+  if [[ -z $shell_line ]] && ((${#argv[@]} == 0)); then
+    die "give the job something to do: --run <command...> or --shell '<line>'"
+  fi
+  if ((${#argv[@]} == 1)) && [[ ${argv[0]} == *[[:space:]]* ]]; then
+    die "--run takes the command as separate words, not one quoted string. Use --shell for a shell line."
+  fi
+
+  systemd-analyze calendar "$schedule" >/dev/null 2>&1 ||
+    die "systemd does not understand the schedule '$schedule'. Check it with: systemd-analyze calendar '$schedule'"
+
+  [[ -f $(job_file "$name") ]] && die "job '$name' already exists (omcron rm $name first)"
+
+  local argv_json='[]'
+  if ((${#argv[@]} > 0)); then
+    argv_json=$(printf '%s\0' "${argv[@]}" | jq -Rsc 'split("\u0000")[:-1]')
+  fi
+  [[ -n $desc ]] || desc=$name
+
+  mkdir -p "$JOB_DIR" "$UNIT_DIR" "$STATE_DIR"
+  jq -n \
+    --arg name "$name" --arg schedule "$schedule" --arg desc "$desc" \
+    --arg mode "$mode" --arg shell "$shell_line" --arg path "$PATH" \
+    --argjson argv "$argv_json" --argjson persistent "$persistent" \
+    --argjson created "$(date +%s)" \
+    '{name:$name,schedule:$schedule,description:$desc,mode:$mode,argv:$argv,shell:$shell,persistent:($persistent==1),path:$path,created:$created}' \
+    >"$(job_file "$name")"
+
+  write_units "$name"
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$(unit_base "$name").timer" >/dev/null
+
+  local next
+  next=$(next_run "$name")
+  notify -g "$G_CLOCK" "Scheduled: $desc" "${mode} · next run $next"
+  refresh_bar
+  echo "Added '$name' ($mode) — $schedule"
+  echo "Next run: $next"
+}
+
+write_units() {
+  local name=$1 job desc mode schedule persistent jobpath base
+  job=$(<"$(job_file "$name")")
+  desc=$(jq -r .description <<<"$job")
+  mode=$(jq -r .mode <<<"$job")
+  schedule=$(jq -r .schedule <<<"$job")
+  persistent=$(jq -r .persistent <<<"$job")
+  jobpath=$(jq -r .path <<<"$job")
+  base=$(unit_base "$name")
+
+  # PATH is captured at add time: a user service otherwise gets a bare PATH and
+  # would not find mise shims, ~/.local/bin or anything else the job expects.
+  # systemd expands % specifiers in unit files, so a PATH (or path) containing a
+  # literal % must be escaped or the unit is silently corrupt. A newline in the
+  # description would end the Description= line and inject a directive. And
+  # ExecStart= is quoted so a $HOME containing a space still works.
+  local esc_path esc_self esc_desc
+  esc_path=${jobpath//%/%%}
+  esc_self=${SELF//%/%%}
+  esc_desc=$(printf '%s' "$desc" | tr '\r\n' '  ')
+  esc_desc=${esc_desc//%/%%}
+
+  cat >"$UNIT_DIR/$base.service" <<UNIT
+[Unit]
+Description=omcron ($mode): $esc_desc
+
+[Service]
+Type=oneshot
+Environment="PATH=$esc_path"
+WorkingDirectory=%h
+ExecStart="$esc_self" fire "$name"
+UNIT
+
+  {
+    echo "[Unit]"
+    echo "Description=omcron timer: $esc_desc"
+    echo
+    echo "[Timer]"
+    echo "OnCalendar=$schedule"
+    [[ $persistent == "true" ]] && echo "Persistent=true"
+    echo "AccuracySec=30s"
+    echo "Unit=$base.service"
+    echo
+    echo "[Install]"
+    echo "WantedBy=timers.target"
+  } >"$UNIT_DIR/$base.timer"
+}
+
+next_run() {
+  local base
+  base=$(unit_base "$1")
+  systemctl --user list-timers --all --output=json "$base.timer" 2>/dev/null |
+    jq -r '(.[0].next // 0) as $n | if $n > 0 then ($n/1000000 | strflocaltime("%a %-d %b %H:%M")) else "not scheduled" end'
+}
+
+is_enabled() {
+  systemctl --user is-enabled "$(unit_base "$1").timer" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------- running
+
+run_job() {
+  local name=$1 job desc log rc=0 shell_line
+  job=$(<"$(job_file "$name")")
+  desc=$(jq -r .description <<<"$job")
+  shell_line=$(jq -r .shell <<<"$job")
+  log="$STATE_DIR/$name.log"
+  mkdir -p "$STATE_DIR"
+
+  echo "----- $(date '+%Y-%m-%d %H:%M:%S') -----" >>"$log"
+
+  if [[ -n $shell_line ]]; then
+    bash -lc "$shell_line" >>"$log" 2>&1 || rc=$?
+  else
+    local -a argv=()
+    mapfile -t argv < <(jq -r '.argv[]' <<<"$job")
+    "${argv[@]}" >>"$log" 2>&1 || rc=$?
+  fi
+
+  echo "exit=$rc" >>"$log"
+
+  if ((rc == 0)); then
+    notify -g "$G_OK" "$desc" "Finished cleanly - click for the log" \
+      --exec "$SELF" log "$name" --notify
+  else
+    notify -u critical -g "$G_FAIL" "$desc failed" "Exit status $rc - click for the log" \
+      --exec "$SELF" log "$name" --notify
+  fi
+  return 0
+}
+
+# The timer target. Auto jobs just run; ask jobs post a clickable request.
+cmd_fire() {
+  local name=${1:-}
+  require_job "$name"
+  local job mode desc token
+  job=$(<"$(job_file "$name")")
+  mode=$(jq -r .mode <<<"$job")
+  desc=$(jq -r .description <<<"$job")
+
+  if [[ $mode == "auto" ]]; then
+    run_job "$name"
+    return 0
+  fi
+
+  # One pending token per job, so an unanswered older request is superseded
+  # rather than stacking up behind the new one.
+  mkdir -p -m 700 "$PENDING_DIR"
+  token="$(date +%s)-$RANDOM"
+  jq -n --arg name "$name" --arg token "$token" --argjson at "$(date +%s)" \
+    '{name:$name,token:$token,at:$at}' >"$PENDING_DIR/$name.json"
+
+  post_request "$name" "$desc" "$token"
+  refresh_bar
+}
+
+# critical, deliberately: Service.qml durationFor() auto-dismisses low after 5s
+# and normal after 8s (30s ceiling even with an explicit -t), and only critical
+# returns duration 0 = stays until acted on. A decision request must not
+# evaporate while you are looking elsewhere.
+post_request() {
+  local name=$1 desc=$2 token=$3
+  notify -u critical -g "$G_ASK" "Run: $desc?" "Click to approve, skip or snooze" \
+    --exec "$SELF" respond "$name" "$token"
+}
+
+# The notification click target: offer the choice in a picker.
+cmd_respond() {
+  local name=${1:-} token=${2:-}
+  require_job "$name"
+  local pending="$PENDING_DIR/$name.json"
+
+  # Fail closed. A token only authorises a run while it is still THE pending
+  # token: no pending file means the request was already answered, and a
+  # different one means a later fire replaced it. Anything else would leave
+  # every stale toast in notification history permanently able to run the job,
+  # since the click action is stored as data and outlives the request.
+  if [[ -n $token ]]; then
+    if [[ ! -f $pending ]]; then
+      notify -g "$G_CLOCK" "$name" "That request was already answered"
+      return 0
+    fi
+    local have
+    have=$(jq -r .token <"$pending" 2>/dev/null || echo "")
+    if [[ $have != "$token" ]]; then
+      notify -g "$G_CLOCK" "Already superseded" "A newer run of this job is waiting"
+      return 0
+    fi
+  fi
+
+  local job desc choice tab
+  job=$(<"$(job_file "$name")")
+  desc=$(jq -r .description <<<"$job")
+  tab=$'\t'
+
+  choice=$("$PICKER_CMD" "$desc" \
+    "󰐊${tab}Run now" \
+    "󰅖${tab}Skip this one" \
+    "󰒲${tab}Snooze 15 minutes" \
+    "󰒲${tab}Snooze 1 hour" \
+    "󰈔${tab}Open the log" 2>/dev/null) || choice=""
+
+  # The token is spent only by an actual decision. Reading the log is not one,
+  # and neither is dismissing the picker - in both cases the request stays
+  # pending so it is still answerable.
+  case $choice in
+  "Run now")
+    rm -f "$pending"
+    run_job "$name"
+    ;;
+  "Skip this one")
+    rm -f "$pending"
+    notify -g "$G_CLOCK" "$desc" "Skipped - next run $(next_run "$name")"
+    ;;
+  "Snooze 15 minutes")
+    rm -f "$pending"
+    snooze "$name" 15
+    ;;
+  "Snooze 1 hour")
+    rm -f "$pending"
+    snooze "$name" 60
+    ;;
+  "Open the log")
+    cmd_log "$name" --notify
+    ;;
+  *)
+    # Dismissed without choosing. Re-post the same token so the request is
+    # visibly back on screen rather than only recoverable from history: an
+    # accidental Esc should cost nothing.
+    local tok
+    tok=$(jq -r .token <"$pending" 2>/dev/null || echo "")
+    if [[ -n $tok ]]; then
+      post_request "$name" "$desc" "$tok"
+    fi
+    ;;
+  esac
+
+  refresh_bar
+}
+
+snooze() {
+  local name=$1 minutes=$2 desc
+  desc=$(jq -r .description <"$(job_file "$name")")
+  systemd-run --user --quiet --collect --on-active="${minutes}m" \
+    --unit="omcron-snooze-$name-$(date +%s)" \
+    "$SELF" fire "$name"
+  notify -g "$G_CLOCK" "$desc" "Snoozed ${minutes} minutes"
+}
+
+# ---------------------------------------------------------------- reading
+
+cmd_list() {
+  if [[ ${1:-} == "-j" || ${1:-} == "--json" ]]; then
+    list_json
+    return 0
+  fi
+
+  shopt -s nullglob
+  local files=("$JOB_DIR"/*.json)
+  shopt -u nullglob
+
+  if ((${#files[@]} == 0)); then
+    echo "No jobs yet. Add one:"
+    echo "  omcron add backup --at daily --auto --run restic backup /home"
+    return 0
+  fi
+
+  printf '%-16s %-6s %-22s %-18s %s\n' NAME MODE SCHEDULE "NEXT RUN" COMMAND
+  local f name job mode schedule cmd next state
+  for f in "${files[@]}"; do
+    job=$(<"$f")
+    name=$(jq -r .name <<<"$job")
+    mode=$(jq -r .mode <<<"$job")
+    schedule=$(jq -r .schedule <<<"$job")
+    cmd=$(job_command "$job")
+    next=$(next_run "$name")
+    is_enabled "$name" || next="disabled"
+    printf '%-16s %-6s %-22s %-18s %s\n' "$name" "$mode" "$schedule" "$next" "$cmd"
+  done
+}
+
+job_command() {
+  local job=$1 shell_line
+  shell_line=$(jq -r .shell <<<"$job")
+  if [[ -n $shell_line ]]; then
+    echo "$shell_line"
+  else
+    jq -r '.argv | join(" ")' <<<"$job"
+  fi
+}
+
+list_json() {
+  shopt -s nullglob
+  local files=("$JOB_DIR"/*.json)
+  local pend=("$PENDING_DIR"/*.json)
+  shopt -u nullglob
+
+  local pending_names='[]' p
+  for p in "${pend[@]}"; do
+    pending_names=$(jq -c --argjson acc "$pending_names" --arg n "$(jq -r .name <"$p")" \
+      '$acc + [$n]' <<<'null')
+  done
+
+  local out='[]' f job name
+  for f in "${files[@]}"; do
+    job=$(<"$f")
+    name=$(jq -r .name <<<"$job")
+    job=$(jq -c --arg next "$(next_run "$name")" \
+      --arg command "$(job_command "$job")" \
+      --argjson enabled "$(is_enabled "$name" && echo true || echo false)" \
+      --argjson pendingNames "$pending_names" \
+      '(.name) as $n | . + {next:$next,command:$command,enabled:$enabled,waiting:(($pendingNames|index($n)) != null)}' \
+      <<<"$job")
+    out=$(jq -c --argjson acc "$out" --argjson item "$job" '$acc + [$item]' <<<'null')
+  done
+
+  # The tooltip is the whole point of the bar indicator: a headline count, then
+  # one line per job saying when it next runs and whether it will ask first.
+  jq -cn --argjson jobs "$out" '
+    ($jobs | length) as $count |
+    ([$jobs[] | select(.waiting)] | length) as $waiting |
+    {
+      count: $count,
+      waiting: $waiting,
+      active: ($count > 0),
+      tooltip: (
+        if $count == 0 then "No scheduled jobs"
+        else
+          (if $waiting == 1 then "1 job waiting for you"
+           elif $waiting > 1 then "\($waiting) jobs waiting for you"
+           elif $count == 1 then "1 job scheduled"
+           else "\($count) jobs scheduled" end)
+          + ([$jobs[] |
+               "\n" + .description + "  "
+               + (if .waiting then "waiting for you"
+                  elif (.enabled | not) then "disabled"
+                  else .next end)
+               + (if .mode == "ask" then "  (asks)" else "  (auto)" end)]
+             | join(""))
+        end
+      ),
+      jobs: $jobs
+    }'
+}
+
+# Clicked in the bar with nothing pending: summarise the schedule as a toast,
+# the same gesture `omarchy reminder show` offers.
+cmd_status() {
+  local data body
+  data=$(list_json)
+  body=$(jq -r '.tooltip' <<<"$data")
+  notify -g "$G_CLOCK" "Scheduled jobs" "$body"
+}
+
+# Clicked in the bar with something pending: open the picker for the oldest
+# outstanding request.
+cmd_answer() {
+  shopt -s nullglob
+  local pend=("$PENDING_DIR"/*.json)
+  shopt -u nullglob
+
+  if ((${#pend[@]} == 0)); then
+    cmd_status
+    return 0
+  fi
+
+  local oldest="" oldest_at="" at f
+  for f in "${pend[@]}"; do
+    at=$(jq -r .at <"$f" 2>/dev/null || echo 0)
+    if [[ -z $oldest_at ]] || ((at < oldest_at)); then
+      oldest_at=$at
+      oldest=$(jq -r .name <"$f")
+    fi
+  done
+
+  [[ -n $oldest ]] || return 0
+  cmd_respond "$oldest" "$(jq -r .token <"$PENDING_DIR/$oldest.json")"
+}
+
+cmd_show() {
+  require_job "${1:-}"
+  local name=$1 job
+  job=$(<"$(job_file "$name")")
+  echo "Name:        $(jq -r .name <<<"$job")"
+  echo "Description: $(jq -r .description <<<"$job")"
+  echo "Mode:        $(jq -r .mode <<<"$job")"
+  echo "Schedule:    $(jq -r .schedule <<<"$job")"
+  echo "Persistent:  $(jq -r .persistent <<<"$job")"
+  echo "Command:     $(job_command "$job")"
+  echo "Enabled:     $(is_enabled "$name" && echo yes || echo no)"
+  echo "Next run:    $(next_run "$name")"
+  echo "Log:         $STATE_DIR/$name.log"
+}
+
+cmd_log() {
+  require_job "${1:-}"
+  local name=$1 log="$STATE_DIR/$1.log"
+  shift
+  [[ -f $log ]] || {
+    if [[ ${1:-} == "--notify" ]]; then
+      notify -g "$G_CLOCK" "$name" "No runs logged yet"
+    else
+      echo "No runs logged yet for '$name'"
+    fi
+    return 0
+  }
+  if [[ ${1:-} == "--notify" ]]; then
+    # Clicked from a toast, where there is no terminal to print into.
+    "$TERM_CMD" bash -lc "less +G '$log'" >/dev/null 2>&1 ||
+      notify -g "$G_CLOCK" "$name" "$(tail -n 8 "$log")"
+    return 0
+  fi
+  tail -n "${1:-40}" "$log"
+}
+
+cmd_pending() {
+  shopt -s nullglob
+  local files=("$PENDING_DIR"/*.json)
+  shopt -u nullglob
+  ((${#files[@]} == 0)) && {
+    echo "Nothing waiting for approval."
+    return 0
+  }
+  local f p
+  for f in "${files[@]}"; do
+    p=$(<"$f")
+    echo "$(jq -r .name <<<"$p") - asked $(date -d "@$(jq -r .at <<<"$p")" '+%H:%M')"
+  done
+}
+
+# ---------------------------------------------------------------- lifecycle
+
+cmd_run() {
+  require_job "${1:-}"
+  run_job "$1"
+}
+
+cmd_test() {
+  require_job "${1:-}"
+  cmd_fire "$1"
+}
+
+cmd_enable() {
+  require_job "${1:-}"
+  systemctl --user enable --now "$(unit_base "$1").timer" >/dev/null
+  refresh_bar
+  echo "Enabled '$1' - next run $(next_run "$1")"
+}
+
+cmd_disable() {
+  require_job "${1:-}"
+  systemctl --user disable --now "$(unit_base "$1").timer" >/dev/null
+  refresh_bar
+  echo "Disabled '$1' (the job is kept; omcron enable $1 turns it back on)"
+}
+
+cmd_rm() {
+  require_job "${1:-}"
+  local name=$1 base
+  base=$(unit_base "$name")
+  systemctl --user disable --now "$base.timer" >/dev/null 2>&1 || true
+  rm -f "$UNIT_DIR/$base.timer" "$UNIT_DIR/$base.service"
+  rm -f "$(job_file "$name")" "$PENDING_DIR/$name.json"
+  systemctl --user daemon-reload
+  refresh_bar
+  echo "Removed '$name' (log kept at $STATE_DIR/$name.log)"
+}
+
+cmd_edit() {
+  require_job "${1:-}"
+  local name=$1
+  shift
+  local job schedule mode
+  job=$(<"$(job_file "$name")")
+
+  while (($# > 0)); do
+    case $1 in
+    --at | --every | --on)
+      shift
+      (($# > 0)) || die "--at needs a schedule"
+      systemd-analyze calendar "$1" >/dev/null 2>&1 || die "systemd does not understand '$1'"
+      job=$(jq -c --arg v "$1" '.schedule=$v' <<<"$job")
+      ;;
+    --ask) job=$(jq -c '.mode="ask"' <<<"$job") ;;
+    --auto) job=$(jq -c '.mode="auto"' <<<"$job") ;;
+    --persistent) job=$(jq -c '.persistent=true' <<<"$job") ;;
+    --no-persistent) job=$(jq -c '.persistent=false' <<<"$job") ;;
+    --desc)
+      shift
+      (($# > 0)) || die "--desc needs text"
+      job=$(jq -c --arg v "$1" '.description=$v' <<<"$job")
+      ;;
+    *) die "unknown option: $1 (to change the command, rm and add again)" ;;
+    esac
+    shift
+  done
+
+  printf '%s' "$job" >"$(job_file "$name")"
+  write_units "$name"
+  systemctl --user daemon-reload
+  systemctl --user restart "$(unit_base "$name").timer" >/dev/null 2>&1 || true
+  refresh_bar
+  echo "Updated '$name' - next run $(next_run "$name")"
+}
+
+# ---------------------------------------------------------------- doctor
+
+# Reports anything that would make a job silently fail to run, and with --fix
+# repairs what is repairable. The common case it exists for: units generated by
+# an older install still name a CLI path that has since moved.
+cmd_doctor() {
+  local fix=0 problems=0 repaired=0 c
+  [[ ${1:-} == "--fix" ]] && fix=1
+
+  echo "omcron $OMCRON_VERSION"
+  echo "  self:  $SELF"
+  echo "  jobs:  $JOB_DIR"
+  echo "  units: $UNIT_DIR"
+  echo
+
+  echo "Required:"
+  for c in bash jq systemctl systemd-analyze systemd-run; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '  ok       %s\n' "$c"
+    else
+      printf '  MISSING  %s\n' "$c"
+      problems=$((problems + 1))
+    fi
+  done
+
+  echo
+  echo "Desktop integration (optional - the CLI works without these):"
+  for c in "$NOTIFY_CMD" "$PICKER_CMD" "$SHELL_CMD" "$TERM_CMD"; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '  ok       %s\n' "$c"
+    else
+      printf '  warn     %s not found\n' "$c"
+    fi
+  done
+
+  echo
+  if [[ ! -x $SELF ]]; then
+    printf '  PROBLEM  self is not executable: %s\n' "$SELF"
+    problems=$((problems + 1))
+  fi
+
+  shopt -s nullglob
+  local files=("$JOB_DIR"/*.json)
+  shopt -u nullglob
+
+  echo "Jobs (${#files[@]}):"
+  local f name base svc want have
+  for f in "${files[@]}"; do
+    name=$(jq -r .name <"$f")
+    base=$(unit_base "$name")
+    svc="$UNIT_DIR/$base.service"
+
+    if [[ ! -f $svc || ! -f "$UNIT_DIR/$base.timer" ]]; then
+      printf '  PROBLEM  %s: unit files missing\n' "$name"
+      problems=$((problems + 1))
+      if ((fix)); then
+        write_units "$name"
+        repaired=$((repaired + 1))
+        printf '           rewritten\n'
+      fi
+      continue
+    fi
+
+    have=$(sed -n 's/^ExecStart=//p' "$svc" | head -1)
+    want="\"${SELF//%/%%}\" fire \"$name\""
+    if [[ $have != "$want" ]]; then
+      printf '  PROBLEM  %s: unit points at a different omcron\n' "$name"
+      printf '           has:  %s\n' "$have"
+      printf '           want: %s\n' "$want"
+      problems=$((problems + 1))
+      if ((fix)); then
+        write_units "$name"
+        repaired=$((repaired + 1))
+        printf '           rewritten\n'
+      fi
+    else
+      printf '  ok       %s\n' "$name"
+    fi
+  done
+
+  shopt -s nullglob
+  local units=("$UNIT_DIR"/omcron-*.timer)
+  shopt -u nullglob
+  local u uname
+  for u in "${units[@]}"; do
+    uname=$(basename "$u" .timer)
+    uname=${uname#omcron-}
+    [[ $uname == snooze-* ]] && continue
+    if [[ ! -f $(job_file "$uname") ]]; then
+      printf '  PROBLEM  units with no job: omcron-%s (omcron rm did not finish?)\n' "$uname"
+      problems=$((problems + 1))
+    fi
+  done
+
+  if ((fix)) && ((problems)); then
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo
+    echo "Reloaded systemd. Re-run 'omcron doctor' to confirm."
+  fi
+
+  echo
+  local unfixed=$((problems - repaired))
+  if ((unfixed > 0)); then
+    ((repaired)) && echo "Repaired $repaired, but $unfixed problem(s) remain." >&2 ||
+      echo "$problems problem(s) found." >&2
+    ((fix)) || echo "Run 'omcron doctor --fix' to repair what is repairable." >&2
+    return 1
+  fi
+  ((repaired)) && echo "Repaired $repaired problem(s). All good." || echo "All good."
+  return 0
+}
+
+usage() {
+  cat <<'USAGE'
+omcron - scheduled jobs that run on their own, or ask you first.
+
+  omcron add <name> --at <schedule> [--auto|--ask] [--persistent]
+                    [--desc "text"] --run <command...>
+  omcron add <name> --at <schedule> --shell '<command line>'
+
+  omcron list [--json]        every job, its schedule and next run
+  omcron show <name>          one job in full
+  omcron run <name>           run it right now, no questions
+  omcron test <name>          simulate a scheduled fire (asks, if it is an ask job)
+  omcron log <name> [lines]   output of past runs
+  omcron pending              requests waiting on you
+  omcron edit <name> [--at ...] [--auto|--ask] [--desc ...]
+  omcron enable|disable <name>
+  omcron rm <name>
+  omcron doctor [--fix]       check the install; repair stale unit paths
+  omcron version
+
+Modes
+  --auto   runs on schedule; you get a notification with the outcome
+  --ask    posts a clickable notification instead; clicking offers
+           Run now / Skip / Snooze 15m / Snooze 1h / Open the log.
+           Ignoring it means the job does not run. Dismissing the picker,
+           or just reading the log, leaves the request pending and answerable.
+
+Schedules are systemd OnCalendar expressions:
+  daily · hourly · weekly · 'Mon..Fri 09:00' · '*:0/15' · '2026-08-26 15:33'
+  Check one with: systemd-analyze calendar '<schedule>'
+
+Examples
+  omcron add mise-claude --at 'Mon..Fri 09:30' --ask \
+         --desc 'Upgrade Claude' --run mise upgrade claude
+  omcron add trash --at weekly --auto --persistent \
+         --shell 'find ~/.local/share/Trash -mtime +30 -delete'
+USAGE
+}
+
+# ---------------------------------------------------------------- dispatch
+
+command -v jq >/dev/null 2>&1 || die "requires jq"
+
+case ${1:-} in
+add)
+  shift
+  cmd_add "$@"
+  ;;
+list | ls)
+  shift
+  cmd_list "$@"
+  ;;
+show | info)
+  shift
+  cmd_show "$@"
+  ;;
+run)
+  shift
+  cmd_run "$@"
+  ;;
+test)
+  shift
+  cmd_test "$@"
+  ;;
+log | logs)
+  shift
+  cmd_log "$@"
+  ;;
+pending)
+  shift
+  cmd_pending "$@"
+  ;;
+status)
+  shift
+  cmd_status "$@"
+  ;;
+answer)
+  shift
+  cmd_answer "$@"
+  ;;
+doctor)
+  shift
+  cmd_doctor "$@"
+  ;;
+version | --version | -V)
+  echo "omcron $OMCRON_VERSION"
+  ;;
+edit)
+  shift
+  cmd_edit "$@"
+  ;;
+enable)
+  shift
+  cmd_enable "$@"
+  ;;
+disable)
+  shift
+  cmd_disable "$@"
+  ;;
+rm | remove | delete)
+  shift
+  cmd_rm "$@"
+  ;;
+fire)
+  shift
+  cmd_fire "$@"
+  ;;
+respond)
+  shift
+  cmd_respond "$@"
+  ;;
+-h | --help | help | "")
+  usage
+  ;;
+*)
+  die "unknown command '$1' (omcron --help)"
+  ;;
+esac

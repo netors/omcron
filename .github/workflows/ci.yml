@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+
+      - name: Parse every script
+        run: |
+          bash -n bin/omcron install.sh test/run.sh test/lib.sh \
+                  test/check-manifest.sh test/plugin-validate.sh
+          for f in test/cases/*.sh test/stubs/*; do bash -n "$f"; done
+
+      - name: shellcheck
+        # The vendored validator is upstream's code; we do not lint it, we diff it.
+        run: |
+          shellcheck -x bin/omcron install.sh test/run.sh test/lib.sh \
+                        test/check-manifest.sh
+          shellcheck -x test/stubs/*
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+      LC_ALL: C
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the suite
+        run: ./test/run.sh
+
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Omarchy's own plugin validator (vendored verbatim)
+        run: ./test/plugin-validate.sh .
+
+      - name: Repo consistency
+        run: ./test/check-manifest.sh
+
+      - name: No symlinks anywhere
+        # A single symlink makes the real installer reject the whole plugin.
+        run: |
+          found=$(find . -path ./.git -prune -o -type l -print)
+          if [ -n "$found" ]; then
+            echo "symlinks found (the plugin validator rejects these):"
+            echo "$found"
+            exit 1
+          fi
+
+  schedules:
+    # Keeps the deliberately-dumb systemd-analyze stub from drifting into lying:
+    # ubuntu runners have the real thing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stub agrees with real systemd-analyze
+        run: |
+          set -u
+          fail=0
+          check() { # expr expected_exit
+            systemd-analyze calendar "$1" >/dev/null 2>&1 && real=0 || real=1
+            OMCRON_TEST_LOG=$(mktemp -d) test/stubs/systemd-analyze calendar "$1" \
+              >/dev/null 2>&1 && stub=0 || stub=1
+            if [ "$real" != "$2" ] || [ "$stub" != "$2" ]; then
+              echo "MISMATCH '$1': real=$real stub=$stub expected=$2"
+              fail=1
+            fi
+          }
+          check 'daily' 0
+          check 'hourly' 0
+          check 'weekly' 0
+          check 'Mon..Fri 09:30' 0
+          check '*:0/15' 0
+          check 'Sun *-*-* 04:00' 0
+          check 'not-a-schedule' 1
+          check 'every tuesday' 1
+          exit $fail

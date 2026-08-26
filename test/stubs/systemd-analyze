@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Deliberately dumb: accepts the OnCalendar shapes omcron's docs use, rejects junk.
+printf '%s\n' "$*" >>"$OMCRON_TEST_LOG/systemd-analyze.log"
+[[ ${1:-} == "calendar" ]] || exit 0
+expr=${2:-}
+case $expr in
+daily | hourly | weekly | monthly | yearly | minutely) exit 0 ;;
+esac
+[[ $expr =~ ^([A-Za-z]{3}(\.\.[A-Za-z]{3})?(,[A-Za-z]{3})*[[:space:]]+)?([0-9*-]+[[:space:]]+)?[0-9*/:,]+$ ]] && exit 0
+exit 1

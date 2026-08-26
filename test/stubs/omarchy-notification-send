@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# NUL-delimited so an argument containing spaces stays one field.
+printf '%s\0' "$@" >>"$OMCRON_TEST_LOG/notify.log"
+printf '\n---\n' >>"$OMCRON_TEST_LOG/notify.log"
+exit 0

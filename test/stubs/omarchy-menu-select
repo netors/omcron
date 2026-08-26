@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Pops the next queued choice. Empty queue or empty line == the user pressed Esc.
+printf '%s\0' "$@" >>"$OMCRON_TEST_LOG/menu.log"
+printf '\n---\n' >>"$OMCRON_TEST_LOG/menu.log"
+q="$OMCRON_TEST_STATE/choices"
+[[ -s $q ]] || exit 1
+choice=$(head -1 "$q")
+tail -n +2 "$q" >"$q.tmp" && mv "$q.tmp" "$q"
+[[ -n $choice ]] || exit 1
+printf '%s\n' "$choice"
