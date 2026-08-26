@@ -1,0 +1,3 @@
+# Resolve `source=` directives relative to the sourcing script, so shellcheck
+# finds test/lib.sh no matter which directory it is invoked from.
+source-path=SCRIPTDIR
