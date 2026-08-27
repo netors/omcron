@@ -20,6 +20,9 @@ Snooze 1h · Open the log**.
 
 ## Install
 
+**omcron is an Omarchy plugin.** If you are already running Omarchy, these two
+commands are the whole install.
+
 ```bash
 omarchy plugin add https://github.com/netors/omcron.git --enable --yes
 ~/.config/omarchy/plugins/netors.omcron/install.sh
